@@ -53,6 +53,7 @@ type DatapointOptions = {
   ga: KnxGroupAddress;
   dpt?: DPT;
   autoread?: boolean;
+  readReqTimeout?: number;
 };
 
 interface DatapointEvent {

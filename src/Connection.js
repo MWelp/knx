@@ -271,7 +271,7 @@ FSM.prototype.read = function (options, callback) {
       const err = new Error(msg);
       KnxLog.get().warn(msg);
       binding(err, null, null);
-    }, readReqTimeout | 3000);
+    }, readReqTimeout || 3000);
   }
   const serviceType = this.useTunneling ?
     KnxConstants.SERVICE_TYPE.TUNNELING_REQUEST :
