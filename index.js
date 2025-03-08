@@ -7,11 +7,11 @@ const path = require('path');
 const util = require('util');
 const log = require('log-driver').logger;
 
-const knx_path = path.join(__dirname, 'package.json');
-const pkginfo = require(knx_path);
+// const knx_path = path.join(__dirname, 'package.json');
+// const pkginfo = require(knx_path);
 
-log.info(util.format('Loading %s: %s, version: %s',
-  pkginfo.name, pkginfo.description, pkginfo.version));
+// log.info(util.format('Loading %s: %s, version: %s',
+//   pkginfo.name, pkginfo.description, pkginfo.version));
 
 exports.Connection = require('./src/Connection.js');
 exports.Datapoint = require('./src/Datapoint.js');
