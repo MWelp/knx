@@ -43,7 +43,7 @@ for (const entry of fs.readdirSync(__dirname)) {
   const matches = entry.match(/(dpt.*)\.js/);
   if (!matches) continue;
   const dptid = matches[1].toUpperCase(); // DPT1..DPTxxx
-  const mod = require(__dirname + path.sep + entry);
+  const mod = require('.' + path.sep + entry);
   if (
     !mod.hasOwnProperty('basetype') ||
     !mod.basetype.hasOwnProperty('bitlength')
