@@ -8,7 +8,7 @@ const util = require('util');
 const EventEmitter = require('events');
 const ipaddr = require('ipaddr.js');
 
-const KnxFsm = require('./FSM');
+const createKnxFsm = require('./FSM');
 const IpRoutingConnection = require('./IpRoutingConnection.js');
 const IpTunnelingConnection = require('./IpTunnelingConnection.js');
 const DPTLib = require('./dptlib');
@@ -80,14 +80,25 @@ class KnxConnection extends EventEmitter {
           range
         );
     }
-    this.fsm = new KnxFsm({ ctx: this });
-    // the state machine's own events (transition, handling, ...) used to be
-    // emitted on the connection, so keep forwarding them
-    this.fsm.on('*', (eventName, data) => this.emit(eventName, data));
+    // inputs deferred by the state machine until it is idle again
+    this.deferredInputs = [];
+    this.fsm = createKnxFsm(this);
+    // the state machine's own events (transitioned, handling, ...) used to be
+    // emitted on the connection, so keep forwarding them; machina 4 called
+    // 'transitioning' 'transition'
+    this.fsm.on('*', (eventName, data) => {
+      if (eventName === 'transitioning') this.emit('transition', data);
+      this.emit(eventName, data);
+    });
   }
 
   get state() {
-    return this.fsm.state;
+    return this.fsm.currentState();
+  }
+
+  // drop all inputs deferred by the state machine
+  clearQueue() {
+    this.deferredInputs = [];
   }
 
   compositeState() {
@@ -231,7 +242,7 @@ KnxConnection.prototype.onUdpSocketMessage = function (msg, rinfo, callback) {
       const signal = util.format('inbound_%s', descr);
       if (descr === "DISCONNECT_REQUEST") {
         KnxLog.get().info("empty internal fsm queue due to %s: ", signal);
-        this.fsm.clearQueue();
+        this.clearQueue();
       }
       this.fsm.handle(signal, dg);
     }
