@@ -169,14 +169,17 @@ test('routing: read', async (t) => {
   t.deepEqual([...data], [1], 'passes the response value');
 });
 
-// Known bug: in routing mode the 'disconnecting' state does nothing, so
-// 'disconnected' is never emitted and the Disconnect callback never runs.
-test('routing: Disconnect', { todo: true }, async (t) => {
+test('routing: Disconnect', async (t) => {
+  const disconnected = once(conn, 'disconnected');
   const called = await Promise.race([
     new Promise((resolve) => conn.Disconnect(() => resolve(true))),
     delay(1000).then(() => false),
   ]);
   t.ok(called, 'calls the Disconnect callback');
+  await disconnected;
+  t.pass("emits 'disconnected'");
+  t.equal(conn.state, 'uninitialized', 'is uninitialized afterwards');
+  t.throws(() => conn.socket.address(), 'closes the socket');
   t.equal(
     bus.received.filter(
       (d) => d.service_type === KnxConstants.SERVICE_TYPE.DISCONNECT_REQUEST
@@ -184,6 +187,5 @@ test('routing: Disconnect', { todo: true }, async (t) => {
     0,
     'sends no DISCONNECT_REQUEST'
   );
-  conn.socket.close();
   bus.socket.close();
 });

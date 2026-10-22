@@ -200,9 +200,15 @@ const createKnxFsm = (connection) =>
       },
 
       disconnecting: {
-        // TODO: skip on pure routing
         _onEnter({ ctx }) {
-          if (ctx.useTunneling) {
+          if (!ctx.useTunneling) {
+            // pure routing has no connection to tear down
+            try {
+              ctx.socket.close();
+            } catch (error) {}
+            ctx.fsm.transition('uninitialized');
+            ctx.emit('disconnected');
+          } else {
             const aliveFor = ctx.conntime ? Date.now() - ctx.conntime : 0;
             KnxLog.get().debug(
               '(%s):\tconnection alive for %d seconds',
