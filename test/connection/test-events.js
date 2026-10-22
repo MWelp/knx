@@ -141,6 +141,19 @@ test("events: 'transition' and 'transitioned' with fromState/toState", async (t)
   close(gw, conn);
 });
 
+test('options are exposed as properties', (t) => {
+  const conn = knx.Connection({
+    manualConnect: true,
+    loglevel: 'error',
+    debug: true,
+    minimumDelay: 50,
+  });
+  t.equal(conn.debug, true, 'debug');
+  t.equal(conn.minimumDelay, 50, 'minimumDelay');
+  t.equal(conn.options.minimumDelay, 50, 'and in options');
+  t.end();
+});
+
 test('events: state reflects the current state', async (t) => {
   const conn = newConnection();
   t.equal(conn.state, 'uninitialized', 'starts uninitialized');
