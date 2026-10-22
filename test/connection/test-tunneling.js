@@ -336,6 +336,50 @@ test('tunneling: Disconnect', async (t) => {
   gw.stop();
 });
 
+test('tunneling: Connect again after Disconnect', async (t) => {
+  const { gw, conn } = await connected();
+  let firstCallback = 0;
+  await new Promise((resolve) =>
+    conn.Disconnect(() => {
+      firstCallback++;
+      resolve();
+    })
+  );
+  const reconnected = once(conn, 'connected');
+  conn.Connect();
+  await reconnected;
+  await delay(300);
+  t.equal(conn.state, 'idle', 'stays connected');
+  t.equal(
+    gw.received.filter((p) => p.name === 'DISCONNECT_REQUEST').length,
+    1,
+    'sends no further DISCONNECT_REQUEST'
+  );
+  await new Promise((resolve) => conn.Disconnect(resolve));
+  t.equal(firstCallback, 1, 'an earlier Disconnect callback is not called again');
+  gw.stop();
+});
+
+test('tunneling: Connect again after a Disconnect issued while busy', async (t) => {
+  const { gw, conn } = await connected((gw) => (gw.ackDelay = 100));
+  conn.write('1/2/3', 1, 'DPT1');
+  await gw.next('TUNNELING_REQUEST');
+  // still waiting for the TUNNELING_ACK
+  await new Promise((resolve) => conn.Disconnect(resolve));
+  t.pass('disconnects once idle');
+  const reconnected = once(conn, 'connected');
+  conn.Connect();
+  await reconnected;
+  await delay(300);
+  t.equal(conn.state, 'idle', 'stays connected');
+  t.equal(
+    gw.received.filter((p) => p.name === 'DISCONNECT_REQUEST').length,
+    1,
+    'sends no further DISCONNECT_REQUEST'
+  );
+  close(gw, conn);
+});
+
 test('tunneling: Disconnect without DISCONNECT_RESPONSE', async (t) => {
   const { gw, conn } = await connected((gw) => (gw.autoAnswerDisconnect = false));
   const started = Date.now();

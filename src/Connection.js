@@ -510,7 +510,9 @@ KnxConnection.prototype.Disconnect = function (cb) {
   this.onIdle(function () {
     KnxLog.get().trace('In Idle-State');
 
-    that.on('disconnected', () => {
+    const subscription = that.on('disconnected', () => {
+      // only for this Disconnect, not for later ones
+      subscription.off();
       KnxLog.get().debug('Disconnected from KNX');
       if (cb) {
         cb()
@@ -530,8 +532,10 @@ KnxConnection.prototype.onIdle = function (cb) {
     KnxLog.get().trace('Connection is already Idle');
     cb();
   } else {
-    this.on("transition", function (data) {
+    const subscription = this.on("transition", function (data) {
       if (data.toState === 'idle') {
+        // only the next time we get idle, not every time
+        subscription.off();
         KnxLog.get().trace('Connection just transitioned to Idle');
         cb();
       }
