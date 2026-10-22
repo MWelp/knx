@@ -65,47 +65,68 @@ interface DatapointEvent {
 }
 
 declare module "knx" {
-  type MachinaEventsCallback = (...args: any[]) => void;
+  type ConnectionEventCallback = (...args: any[]) => void;
 
-  interface MachinaEventsReturn {
+  interface ConnectionEventSubscription {
     eventName: string;
-    callback: MachinaEventsCallback;
+    callback: ConnectionEventCallback;
     off: () => void;
   }
 
-  class MachinaEvents {
-    emit(eventName: string): void;
-    on(eventName: string, callback: MachinaEventsCallback): MachinaEventsReturn;
-    off(eventName?: string, callback?: MachinaEventsCallback): void;
+  /**
+   * The event API of a connection. It works like Node's EventEmitter, except
+   * that on() returns a subscription, off() without a callback removes all
+   * listeners (of an event), '*' listeners receive every event with its name
+   * first, and an 'error' event without listener is ignored.
+   */
+  class ConnectionEvents {
+    emit(eventName: string, ...args: any[]): boolean;
+    on(eventName: string, callback: ConnectionEventCallback): ConnectionEventSubscription;
+    once(eventName: string, callback: ConnectionEventCallback): this;
+    off(eventName?: string, callback?: ConnectionEventCallback): this;
+    removeListener(eventName: string, callback: ConnectionEventCallback): this;
+    removeAllListeners(eventName?: string): this;
+    listenerCount(eventName: string): number;
   }
 
-  interface MachinaEventsReturn {
-    eventName: string;
-    callback: MachinaEventsCallback;
-    off: () => void;
-  }
+  /** @deprecated use ConnectionEventCallback */
+  type MachinaEventsCallback = ConnectionEventCallback;
+  /** @deprecated use ConnectionEventSubscription */
+  type MachinaEventsReturn = ConnectionEventSubscription;
+  /** @deprecated use ConnectionEvents */
+  type MachinaEvents = ConnectionEvents;
 
-  export interface IConnection extends MachinaEvents {
+  type ReadOptions = {
+    ga: KnxGroupAddress;
+    /** milliseconds to wait for the response, default 3000 */
+    readReqTimeout?: number;
+  };
+
+  export interface IConnection extends ConnectionEvents {
     debug: boolean;
+    /** the current state of the connection state machine, e.g. 'idle' */
+    readonly state: string;
     Connect(): void;
     Disconnect(cb?: () => void): void;
-    read(ga: KnxGroupAddress, cb?: (err: Error, src: KnxDeviceAddress, value: Buffer) => void): void;
-    write(ga: KnxGroupAddress, value: Buffer, dpt: DPT, cb?: () => void): void;
+    read(options: ReadOptions, cb?: (err: Error, src: KnxDeviceAddress, value: Buffer) => void): void;
+    write(ga: KnxGroupAddress, value: KnxValue | Buffer, dpt: DPT, cb?: () => void): void;
   }
 
-  export class Connection extends MachinaEvents implements IConnection {
+  export class Connection extends ConnectionEvents implements IConnection {
     public debug: boolean;
+    readonly state: string;
     constructor(conf: ConnectionSpec);
     Connect(): void;
     Disconnect(cb?: () => void): void;
-    read(ga: KnxGroupAddress, cb?: (err: Error, src: KnxDeviceAddress, value: Buffer) => void): void;
-    write(ga: KnxGroupAddress, value: Buffer, dpt: DPT, cb?: () => void): void;
+    read(options: ReadOptions, cb?: (err: Error, src: KnxDeviceAddress, value: Buffer) => void): void;
+    write(ga: KnxGroupAddress, value: KnxValue | Buffer, dpt: DPT, cb?: () => void): void;
     writeRaw(
       ga: KnxGroupAddress,
       value: Buffer,
       bitlength?: number,
       cb?: () => void
     ): void;
+    respond(ga: KnxGroupAddress, value: KnxValue | Buffer, dpt: DPT): void;
   }
 
   export class Datapoint extends events.EventEmitter implements DatapointEvent {
