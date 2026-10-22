@@ -1,9 +1,9 @@
 {
   "name": "knx",
-  "description": "KNXnet/IP protocol implementation for Node(>=6.x)",
+  "description": "KNXnet/IP protocol implementation for Node(>=14.x)",
   "version": "2.5.4",
   "engines": {
-    "node": ">=6"
+    "node": ">=14"
   },
   "private": false,
   "repository": {
@@ -88,15 +88,15 @@
     "building automation"
   ],
   "dependencies": {
-    "@types/node": "^6.14.4",
-    "binary-parser": "1.1.5",
+    "@types/node": "^22.20.5",
+    "binary-parser": "2.3.0",
     "binary-protocol": "0.0.0",
-    "ipaddr.js": "1.2.0",
+    "ipaddr.js": "2.5.0",
     "log-driver": "1.2.7",
     "machina": "^4.0.2"
   },
   "devDependencies": {
-    "multi-tape": "^1.2.1",
-    "tape": "^4.10.1"
+    "multi-tape": "^1.17.1",
+    "tape": "^5.10.3"
   }
 }
