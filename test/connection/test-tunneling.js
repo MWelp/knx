@@ -304,6 +304,50 @@ test('tunneling: minimumDelay between outbound requests', async (t) => {
   close(gw, conn);
 });
 
+test('tunneling: minimumDelay keeps the order of outbound requests', async (t) => {
+  const { gw, conn } = await connected(null, { minimumDelay: 5 });
+  // measure when the connection hands each request to its socket: the
+  // gateway's receive times jitter by more than the delay itself under load
+  const sentAt = [];
+  const send = conn.socket.send.bind(conn.socket);
+  conn.socket.send = (buf, ...args) => {
+    if (buf.readUInt16BE(2) === 0x0420) sentAt.push(Date.now()); // TUNNELING_REQUEST
+    return send(buf, ...args);
+  };
+  const count = 40;
+  for (let i = 0; i < count; i++) conn.write(`4/0/${i}`, 1, 'DPT1');
+  const requests = [];
+  for (let i = 0; i < count; i++) requests.push(await gw.next('TUNNELING_REQUEST'));
+  t.deepEqual(
+    requests.map((dg) => dg.cemi.dest_addr),
+    Array.from({ length: count }, (_, i) => `4/0/${i}`),
+    'sends the requests in the order they were issued'
+  );
+  const gaps = sentAt.slice(1).map((at, i) => at - sentAt[i]);
+  t.ok(
+    gaps.every((gap) => gap >= 4),
+    `keeps minimumDelay between all of them (min ${Math.min(...gaps)}ms)`
+  );
+  close(gw, conn);
+});
+
+test('tunneling: a request waiting for minimumDelay survives a connection state check', async (t) => {
+  const { gw, conn } = await connected(null, { minimumDelay: 300 });
+  // right after connecting the first request has to wait
+  conn.write('4/1/1', 1, 'DPT1');
+  conn.write('4/1/2', 1, 'DPT1');
+  forceState(conn, 'requestingConnState');
+  await gw.next('CONNECTIONSTATE_REQUEST');
+  const first = await gw.next('TUNNELING_REQUEST');
+  const second = await gw.next('TUNNELING_REQUEST');
+  t.deepEqual(
+    [first.cemi.dest_addr, second.cemi.dest_addr],
+    ['4/1/1', '4/1/2'],
+    'sends both requests afterwards, in order'
+  );
+  close(gw, conn);
+});
+
 test('tunneling: requests issued while connecting are sent once connected', async (t) => {
   const gw = await new FakeGateway().start();
   gw.autoConnect = false;
