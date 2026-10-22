@@ -420,6 +420,29 @@ test('tunneling: DISCONNECT_REQUEST from the gateway triggers a reconnect', asyn
   close(gw, conn);
 });
 
+test('tunneling: checks the connection state when idle for idleTimeout', async (t) => {
+  const { gw, conn } = await connected(null, { idleTimeout: 200 });
+  const errors = record(conn, ['error']);
+  const started = Date.now();
+  await gw.next('CONNECTIONSTATE_REQUEST', 2000);
+  const elapsed = Date.now() - started;
+  t.ok(elapsed >= 150, `sends a CONNECTIONSTATE_REQUEST (${elapsed}ms)`);
+  await delay(100);
+  t.equal(conn.state, 'idle', 'is idle again after the response');
+  t.deepEqual(errors, [], 'emits no error');
+  close(gw, conn);
+});
+
+test('tunneling: no connection state check after Disconnect', async (t) => {
+  const { gw, conn } = await connected(null, { idleTimeout: 300 });
+  await new Promise((resolve) => conn.Disconnect(resolve));
+  const log = record(conn, ['error', 'disconnected', 'connected']);
+  await delay(1800);
+  t.equal(conn.state, 'uninitialized', 'stays disconnected');
+  t.deepEqual(log, [], 'emits no further events');
+  gw.stop();
+});
+
 test('tunneling: connection state check', async (t) => {
   const { gw, conn } = await connected();
   const log = record(conn, ['error', 'disconnected']);

@@ -39,6 +39,8 @@ class KnxConnection extends EventEmitter {
     this.ThreeLevelGroupAddressing = true;
     // reconnection cycle counter
     this.reconnection_cycles = 0;
+    // inactivity before checking the connection state (internal, tests shorten it)
+    this.idleTimeout = this.idleTimeout || 60000;
     // a cache of recently sent requests
     this.sentTunnRequests = {};
     this.useTunneling = options.forceTunneling || false;

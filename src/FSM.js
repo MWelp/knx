@@ -30,6 +30,12 @@ const deferUntilIdle = (ctx, inputName, args) => {
   ctx.deferredInputs.push({ inputName, args });
 };
 
+// the connection state check only makes sense on an established connection
+const clearIdleTimer = (ctx) => {
+  clearTimeout(ctx.idletimer);
+  ctx.idletimer = null;
+};
+
 const processQueue = (ctx) => {
   // replaying an input may pass through idle again (e.g. via
   // recvTunnReqIndication); the outer loop picks up the rest
@@ -55,6 +61,9 @@ const createKnxFsm = (connection) =>
 
     states: {
       uninitialized: {
+        _onEnter({ ctx }) {
+          clearIdleTimer(ctx);
+        },
         ['*']({ ctx }) {
           ctx.fsm.transition('connecting');
         },
@@ -68,6 +77,7 @@ const createKnxFsm = (connection) =>
 
       connecting: {
         _onEnter({ ctx }) {
+          clearIdleTimer(ctx);
           // tell listeners that we disconnected
           // putting this here will result in a correct state for our listeners
           ctx.emit('disconnected');
@@ -201,6 +211,7 @@ const createKnxFsm = (connection) =>
 
       disconnecting: {
         _onEnter({ ctx }) {
+          clearIdleTimer(ctx);
           if (!ctx.useTunneling) {
             // pure routing has no connection to tear down
             try {
@@ -267,7 +278,7 @@ const createKnxFsm = (connection) =>
                 ctx.fsm.transition('requestingConnState');
                 clearTimeout(ctx.idletimer);
                 ctx.idletimer = null;
-              }, 60000);
+              }, ctx.idleTimeout);
             }
           }
           // debuglog the current FSM state plus a custom message
