@@ -64,7 +64,7 @@ const close = (gw, conn) => {
 
 // The only place where the tests reach into the state machine directly:
 // the idle timeout before a connection state check is 60s, too long to wait.
-const forceState = (conn, state) => conn.transition(state);
+const forceState = (conn, state) => conn.fsm.transition(state);
 
 module.exports = {
   knx,

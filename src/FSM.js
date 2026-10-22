@@ -3,68 +3,17 @@
  * (C) 2016-2018 Elias Karakoulakis
  */
 
-const os = require('os');
 const util = require('util');
-const ipaddr = require('ipaddr.js');
 const machina = require('machina');
 const KnxConstants = require('./KnxConstants.js');
-const IpRoutingConnection = require('./IpRoutingConnection.js');
-const IpTunnelingConnection = require('./IpTunnelingConnection.js');
 const KnxLog = require('./KnxLog.js');
 
-module.exports = machina.Fsm.extend({
-  initialize(options) {
-    this.options = options || {};
-    // initialise the log driver - to set the loglevel
-    this.log = KnxLog.get(options);
-    // set the local IP endpoint
-    this.localAddress = null;
-    this.ThreeLevelGroupAddressing = true;
-    // reconnection cycle counter
-    this.reconnection_cycles = 0;
-    // a cache of recently sent requests
-    this.sentTunnRequests = {};
-    this.useTunneling = options.forceTunneling || false;
-    this.remoteEndpoint = {
-      addrstring: options.ipAddr || '224.0.23.12',
-      addr: ipaddr.parse(options.ipAddr || '224.0.23.12'),
-      port: options.ipPort || 3671,
-    };
-    const range = this.remoteEndpoint.addr.range();
-    this.localEchoInTunneling =
-      typeof options.localEchoInTunneling !== 'undefined'
-        ? options.localEchoInTunneling
-        : false; // 14=73/2020 Supergiovane (local echo of emitEvent if in tunneling mode)
-    this.log.debug(
-      'initializing %s connection to %s',
-      range,
-      this.remoteEndpoint.addrstring
-    );
-    switch (range) {
-      case 'multicast':
-        if (this.localEchoInTunneling) {
-          this.localEchoInTunneling = false;
-          this.log.debug(
-            'localEchoInTunneling: true but DISABLED because i am on multicast'
-          );
-        } // 14/03/2020 Supergiovane: if multicast, disable the localEchoInTunneling, because there is already an echo
-        IpRoutingConnection(this);
-        break;
-      case 'unicast':
-      case 'private':
-      case 'loopback':
-        this.useTunneling = true;
-        IpTunnelingConnection(this);
-        break;
-      default:
-        throw util.format(
-          'IP address % (%s) cannot be used for KNX',
-          options.ipAddr,
-          range
-        );
-    }
-  },
-
+/*
+ * The connection state machine. It only holds the states; all connection
+ * data and helpers live on the connection object, which every handler
+ * accesses as `ctx` (create with `new KnxFsm({ ctx: connection })`).
+ */
+const KnxFsm = machina.Fsm.extend({
   namespace: 'knxnet',
 
   initialState: 'uninitialized',
@@ -84,34 +33,33 @@ module.exports = machina.Fsm.extend({
 
     connecting: {
       _onEnter() {
+        const ctx = this.ctx;
         // tell listeners that we disconnected
         // putting this here will result in a correct state for our listeners
-        this.emit('disconnected');
-        this.log.debug(util.format('useTunneling=%j', this.useTunneling));
-        if (this.useTunneling) {
+        ctx.emit('disconnected');
+        ctx.log.debug(util.format('useTunneling=%j', ctx.useTunneling));
+        if (ctx.useTunneling) {
           let connection_attempts = 0;
-          if (!this.localAddress)
+          if (!ctx.localAddress)
             throw 'Not bound to an IPv4 non-loopback interface';
-          this.log.debug(
-            util.format('Connecting via %s...', this.localAddress)
-          );
+          ctx.log.debug(util.format('Connecting via %s...', ctx.localAddress));
           // we retry 3 times, then restart the whole cycle using a slower and slower rate (max delay is 5 minutes)
-          this.connecttimer = setInterval(() => {
+          ctx.connecttimer = setInterval(() => {
             connection_attempts += 1;
             if (connection_attempts >= 3) {
-              clearInterval(this.connecttimer);
+              clearInterval(ctx.connecttimer);
               // quite a few KNXnet/IP devices drop any tunneling packets received via multicast
-              if (this.remoteEndpoint.addr.range() == 'multicast') {
-                this.log.warn(
+              if (ctx.remoteEndpoint.addr.range() == 'multicast') {
+                ctx.log.warn(
                   'connection timed out, falling back to pure routing mode...'
                 );
-                this.usingMulticastTunneling = true;
+                ctx.usingMulticastTunneling = true;
                 this.transition('connected');
               } else {
                 // we restart the connection cycle with a growing delay (max 5 minutes)
-                this.reconnection_cycles += 1;
-                const delay = Math.min(this.reconnection_cycles * 3, 300);
-                this.log.debug(
+                ctx.reconnection_cycles += 1;
+                const delay = Math.min(ctx.reconnection_cycles * 3, 300);
+                ctx.log.debug(
                   'reattempting connection in ' + delay + ' seconds'
                 );
                 setTimeout(
@@ -121,18 +69,18 @@ module.exports = machina.Fsm.extend({
                 );
               }
             } else {
-              this.log.warn('connection timed out, retrying...');
-              this.send(
-                this.prepareDatagram(KnxConstants.SERVICE_TYPE.CONNECT_REQUEST)
+              ctx.log.warn('connection timed out, retrying...');
+              ctx.send(
+                ctx.prepareDatagram(KnxConstants.SERVICE_TYPE.CONNECT_REQUEST)
               );
             }
           }, 3000);
-          delete this.channel_id;
-          delete this.conntime;
-          delete this.lastSentTime;
+          delete ctx.channel_id;
+          delete ctx.conntime;
+          delete ctx.lastSentTime;
           // send connect request directly
-          this.send(
-            this.prepareDatagram(KnxConstants.SERVICE_TYPE.CONNECT_REQUEST)
+          ctx.send(
+            ctx.prepareDatagram(KnxConstants.SERVICE_TYPE.CONNECT_REQUEST)
           );
         } else {
           // no connection sequence needed in pure multicast routing
@@ -140,32 +88,33 @@ module.exports = machina.Fsm.extend({
         }
       },
       _onExit() {
-        clearInterval(this.connecttimer);
+        clearInterval(this.ctx.connecttimer);
       },
       inbound_CONNECT_RESPONSE(datagram) {
-        this.log.debug(util.format('got connect response'));
+        const ctx = this.ctx;
+        ctx.log.debug(util.format('got connect response'));
         if (
           datagram.hasOwnProperty('connstate') &&
           datagram.connstate.status ===
             KnxConstants.RESPONSECODE.E_NO_MORE_CONNECTIONS
         ) {
           try {
-            this.socket.close();
+            ctx.socket.close();
           } catch (error) {}
           this.transition('uninitialized');
-          this.emit('disconnected');
-          this.log.debug(
+          ctx.emit('disconnected');
+          ctx.log.debug(
             'The KNXnet/IP server rejected the data connection (Maximum connections reached). Waiting 1 minute before retrying...'
           );
           setTimeout(() => {
-            this.Connect();
+            ctx.Connect();
           }, 60000);
         } else {
           // store channel ID into the Connection object
-          this.channel_id = datagram.connstate.channel_id;
+          ctx.channel_id = datagram.connstate.channel_id;
           // send connectionstate request directly
-          this.send(
-            this.prepareDatagram(
+          ctx.send(
+            ctx.prepareDatagram(
               KnxConstants.SERVICE_TYPE.CONNECTIONSTATE_REQUEST
             )
           );
@@ -173,12 +122,13 @@ module.exports = machina.Fsm.extend({
         }
       },
       inbound_CONNECTIONSTATE_RESPONSE(datagram) {
-        if (this.useTunneling) {
+        const ctx = this.ctx;
+        if (ctx.useTunneling) {
           const str = KnxConstants.keyText(
             'RESPONSECODE',
             datagram.connstate.status
           );
-          this.log.debug(
+          ctx.log.debug(
             util.format(
               'Got connection state response, connstate: %s, channel ID: %d',
               str,
@@ -189,56 +139,60 @@ module.exports = machina.Fsm.extend({
         }
       },
       ['*'](data) {
-        this.log.debug(util.format('*** deferring Until Transition %j', data));
+        this.ctx.log.debug(
+          util.format('*** deferring Until Transition %j', data)
+        );
         this.deferUntilTransition('idle');
       },
     },
 
     connected: {
       _onEnter() {
+        const ctx = this.ctx;
         // Reset connection reattempts cycle counter for next disconnect
-        this.reconnection_cycles = 0;
+        ctx.reconnection_cycles = 0;
         // Reset outgoing sequence counter..
-        this.seqnum = -1;
+        ctx.seqnum = -1;
         /* important note: the sequence counter is SEPARATE for incoming and
           outgoing datagrams. We only keep track of the OUTGOING L_Data.req
           and we simply acknowledge the incoming datagrams with their own seqnum */
-        this.lastSentTime = this.conntime = Date.now();
-        this.log.debug(
+        ctx.lastSentTime = ctx.conntime = Date.now();
+        ctx.log.debug(
           util.format(
             '--- Connected in %s mode ---',
-            this.useTunneling ? 'TUNNELING' : 'ROUTING'
+            ctx.useTunneling ? 'TUNNELING' : 'ROUTING'
           )
         );
         this.transition('idle');
-        this.emit('connected');
+        ctx.emit('connected');
       },
     },
 
     disconnecting: {
       // TODO: skip on pure routing
       _onEnter() {
-        if (this.useTunneling) {
-          const aliveFor = this.conntime ? Date.now() - this.conntime : 0;
+        const ctx = this.ctx;
+        if (ctx.useTunneling) {
+          const aliveFor = ctx.conntime ? Date.now() - ctx.conntime : 0;
           KnxLog.get().debug(
             '(%s):\tconnection alive for %d seconds',
             this.compositeState(),
             aliveFor / 1000
           );
-          this.disconnecttimer = setTimeout(() => {
+          ctx.disconnecttimer = setTimeout(() => {
             KnxLog.get().debug(
               '(%s):\tconnection timed out',
               this.compositeState()
             );
             try {
-              this.socket.close();
+              ctx.socket.close();
             } catch (error) {}
             this.transition('uninitialized');
-            this.emit('disconnected');
+            ctx.emit('disconnected');
           }, 3000);
           //
-          this.send(
-            this.prepareDatagram(KnxConstants.SERVICE_TYPE.DISCONNECT_REQUEST),
+          ctx.send(
+            ctx.prepareDatagram(KnxConstants.SERVICE_TYPE.DISCONNECT_REQUEST),
             (err) => {
               // TODO: handle send err
               KnxLog.get().debug(
@@ -250,32 +204,34 @@ module.exports = machina.Fsm.extend({
         }
       },
       _onExit() {
-        clearTimeout(this.disconnecttimer);
+        clearTimeout(this.ctx.disconnecttimer);
       },
       inbound_DISCONNECT_RESPONSE(datagram) {
-        if (this.useTunneling) {
+        const ctx = this.ctx;
+        if (ctx.useTunneling) {
           KnxLog.get().debug(
             '(%s):\tgot disconnect response',
             this.compositeState()
           );
           try {
-            this.socket.close();
+            ctx.socket.close();
           } catch (error) {}
           this.transition('uninitialized');
-          this.emit('disconnected');
+          ctx.emit('disconnected');
         }
       },
     },
 
     idle: {
       _onEnter() {
-        if (this.useTunneling) {
-            if (this.idletimer == null) { // set one
+        const ctx = this.ctx;
+        if (ctx.useTunneling) {
+            if (ctx.idletimer == null) { // set one
                 // time out on inactivity...
-                this.idletimer = setTimeout( () => {
+                ctx.idletimer = setTimeout( () => {
                     this.transition('requestingConnState');
-                    clearTimeout(this.idletimer);
-                    this.idletimer = null;
+                    clearTimeout(ctx.idletimer);
+                    ctx.idletimer = null;
                 }, 60000);
             }
         }
@@ -291,11 +247,12 @@ module.exports = machina.Fsm.extend({
 
       // 1) queue an OUTGOING routing indication...
       outbound_ROUTING_INDICATION(datagram) {
-        const elapsed = Date.now() - this.lastSentTime;
+        const ctx = this.ctx;
+        const elapsed = Date.now() - ctx.lastSentTime;
         // if no miminum delay set OR the last sent datagram was long ago...
         if (
-          !this.options.minimumDelay ||
-          elapsed >= this.options.minimumDelay
+          !ctx.options.minimumDelay ||
+          elapsed >= ctx.options.minimumDelay
         ) {
           // ... send now
           this.transition('sendDatagram', datagram);
@@ -303,19 +260,20 @@ module.exports = machina.Fsm.extend({
           // .. or else, let the FSM handle it later
           setTimeout(
             () => this.handle('outbound_ROUTING_INDICATION', datagram),
-            this.minimumDelay - elapsed
+            ctx.minimumDelay - elapsed
           );
         }
       },
 
       // 2) queue an OUTGOING tunelling request...
       outbound_TUNNELING_REQUEST(datagram) {
-        if (this.useTunneling) {
-          const elapsed = Date.now() - this.lastSentTime;
+        const ctx = this.ctx;
+        if (ctx.useTunneling) {
+          const elapsed = Date.now() - ctx.lastSentTime;
           // if no miminum delay set OR the last sent datagram was long ago...
           if (
-            !this.options.minimumDelay ||
-            elapsed >= this.options.minimumDelay
+            !ctx.options.minimumDelay ||
+            elapsed >= ctx.options.minimumDelay
           ) {
             // ... send now
             this.transition('sendDatagram', datagram);
@@ -323,7 +281,7 @@ module.exports = machina.Fsm.extend({
             // .. or else, let the FSM handle it later
             setTimeout(
               () => this.handle('outbound_TUNNELING_REQUEST', datagram),
-              this.minimumDelay - elapsed
+              ctx.minimumDelay - elapsed
             );
           }
         } else {
@@ -336,7 +294,7 @@ module.exports = machina.Fsm.extend({
 
       // 3) receive an INBOUND tunneling request INDICATION (L_Data.ind)
       ['inbound_TUNNELING_REQUEST_L_Data.ind'](datagram) {
-        if (this.useTunneling) {
+        if (this.ctx.useTunneling) {
           this.transition('recvTunnReqIndication', datagram);
         }
       },
@@ -347,11 +305,12 @@ module.exports = machina.Fsm.extend({
        *  in ETS, usually on the 'primary' device that contains the actuator endpoint
        */
       ['inbound_TUNNELING_REQUEST_L_Data.con'](datagram) {
-        if (this.useTunneling) {
-          const confirmed = this.sentTunnRequests[datagram.cemi.dest_addr];
+        const ctx = this.ctx;
+        if (ctx.useTunneling) {
+          const confirmed = ctx.sentTunnRequests[datagram.cemi.dest_addr];
           if (confirmed) {
-            delete this.sentTunnRequests[datagram.cemi.dest_addr];
-            this.emit('confirmed', confirmed);
+            delete ctx.sentTunnRequests[datagram.cemi.dest_addr];
+            ctx.emit('confirmed', confirmed);
           }
           KnxLog.get().trace(
             '(%s): %s %s',
@@ -361,17 +320,17 @@ module.exports = machina.Fsm.extend({
               ? 'delivery confirmation (L_Data.con) received'
               : 'unknown dest addr'
           );
-          this.acknowledge(datagram);
+          ctx.acknowledge(datagram);
         }
       },
 
       // 5) receive an INBOUND ROUTING_INDICATION (L_Data.ind)
       ['inbound_ROUTING_INDICATION_L_Data.ind'](datagram) {
-        this.emitEvent(datagram);
+        this.ctx.emitEvent(datagram);
       },
 
       inbound_DISCONNECT_REQUEST(datagram) {
-        if (this.useTunneling) {
+        if (this.ctx.useTunneling) {
           this.transition('connecting');
         }
       },
@@ -380,30 +339,32 @@ module.exports = machina.Fsm.extend({
     // if idle for too long, request connection state from the KNX IP router
     requestingConnState: {
       _onEnter() {
+        const ctx = this.ctx;
         // added to note sending connectionstate_request
         KnxLog.get().debug( 'Requesting Connection State');
         KnxLog.get().trace(
           '(%s): Requesting Connection State',
           this.compositeState()
         );
-        this.send(
-          this.prepareDatagram(
+        ctx.send(
+          ctx.prepareDatagram(
             KnxConstants.SERVICE_TYPE.CONNECTIONSTATE_REQUEST
           )
         );
         // TODO: handle send err
         //
-        this.connstatetimer = setTimeout(() => {
+        ctx.connstatetimer = setTimeout(() => {
           const msg = 'timed out waiting for CONNECTIONSTATE_RESPONSE';
           KnxLog.get().trace('(%s): %s', this.compositeState(), msg);
           this.transition('connecting');
-          this.emit('error', msg);
+          ctx.emit('error', msg);
         }, 1000);
       },
       _onExit() {
-        clearTimeout(this.connstatetimer);
+        clearTimeout(this.ctx.connstatetimer);
       },
       inbound_CONNECTIONSTATE_RESPONSE(datagram) {
+        const ctx = this.ctx;
         const state = KnxConstants.keyText(
           'RESPONSECODE',
           datagram.connstate.status
@@ -413,7 +374,7 @@ module.exports = machina.Fsm.extend({
             this.transition('idle');
             break;
           default:
-            this.log.debug(
+            ctx.log.debug(
               util.format(
                 '*** error: %s *** (connstate.code: %d)',
                 state,
@@ -421,11 +382,11 @@ module.exports = machina.Fsm.extend({
               )
             );
             this.transition('connecting');
-            this.emit('error', state);
+            ctx.emit('error', state);
         }
       },
       ['*'](data) {
-        this.log.debug(
+        this.ctx.log.debug(
           util.format(
             '*** deferring %s until transition from requestingConnState => idle',
             data.inputType
@@ -440,25 +401,26 @@ module.exports = machina.Fsm.extend({
      */
     sendDatagram: {
       _onEnter(datagram) {
+        const ctx = this.ctx;
         // send the telegram on the wire
-        this.seqnum += 1;
-        if (this.useTunneling) datagram.tunnstate.seqnum = this.seqnum & 0xff;
-        this.send(datagram, (err) => {
+        ctx.seqnum += 1;
+        if (ctx.useTunneling) datagram.tunnstate.seqnum = ctx.seqnum & 0xff;
+        ctx.send(datagram, (err) => {
           if (err) {
             //console.trace('error sending datagram, going idle');
-            this.seqnum -= 1;
+            ctx.seqnum -= 1;
             this.transition('idle');
           } else {
             // successfully sent the datagram
-            if (this.useTunneling)
-              this.sentTunnRequests[datagram.cemi.dest_addr] = datagram;
-            this.lastSentTime = Date.now();
-            this.log.debug(
+            if (ctx.useTunneling)
+              ctx.sentTunnRequests[datagram.cemi.dest_addr] = datagram;
+            ctx.lastSentTime = Date.now();
+            ctx.log.debug(
               '(%s):\t>>>>>>> successfully sent seqnum: %d',
               this.compositeState(),
-              this.seqnum
+              ctx.seqnum
             );
-            if (this.useTunneling) {
+            if (ctx.useTunneling) {
               // and then wait for the acknowledgement
               this.transition('sendTunnReq_waitACK', datagram);
             } else {
@@ -467,26 +429,26 @@ module.exports = machina.Fsm.extend({
           }
           // 14/03/2020 Supergiovane: In multicast mode, other node-red nodes receives the echo of the telegram sent (the groupaddress_write event). If in tunneling, force the emit of the echo datagram (so other node-red nodes can receive the echo), because in tunneling, there is no echo.
           // ########################
-          //if (this.useTunneling) this.sentTunnRequests[datagram.cemi.dest_addr] = datagram;
-          if (this.useTunneling) {
-            this.sentTunnRequests[datagram.cemi.dest_addr] = datagram;
+          //if (ctx.useTunneling) ctx.sentTunnRequests[datagram.cemi.dest_addr] = datagram;
+          if (ctx.useTunneling) {
+            ctx.sentTunnRequests[datagram.cemi.dest_addr] = datagram;
             if (
-              typeof this.localEchoInTunneling !== 'undefined' &&
-              this.localEchoInTunneling
+              typeof ctx.localEchoInTunneling !== 'undefined' &&
+              ctx.localEchoInTunneling
             ) {
               try {
-                this.emitEvent(datagram);
-                this.log.debug(
+                ctx.emitEvent(datagram);
+                ctx.log.debug(
                   '(%s):\t>>>>>>> localEchoInTunneling: echoing by emitting %d',
                   this.compositeState(),
-                  this.seqnum
+                  ctx.seqnum
                 );
               } catch (error) {
-                this.log.debug(
+                ctx.log.debug(
                   '(%s):\t>>>>>>> localEchoInTunneling: error echoing by emitting %d ' +
                     error,
                   this.compositeState(),
-                  this.seqnum
+                  ctx.seqnum
                 );
               }
             }
@@ -495,7 +457,7 @@ module.exports = machina.Fsm.extend({
         });
       },
       ['*'](data) {
-        this.log.debug(
+        this.ctx.log.debug(
           util.format(
             '*** deferring %s until transition sendDatagram => idle',
             data.inputType
@@ -510,19 +472,20 @@ module.exports = machina.Fsm.extend({
      */
     sendTunnReq_waitACK: {
       _onEnter(datagram) {
-        //this.log.debug('setting up tunnreq timeout for %j', datagram);
-        this.tunnelingAckTimer = setTimeout(() => {
-          this.log.debug('timed out waiting for TUNNELING_ACK');
+        const ctx = this.ctx;
+        //ctx.log.debug('setting up tunnreq timeout for %j', datagram);
+        ctx.tunnelingAckTimer = setTimeout(() => {
+          ctx.log.debug('timed out waiting for TUNNELING_ACK');
           // TODO: resend datagram, up to 3 times
           this.transition('idle');
-          this.emit('tunnelreqfailed', datagram);
+          ctx.emit('tunnelreqfailed', datagram);
         }, 2000);
       },
       _onExit() {
-        clearTimeout(this.tunnelingAckTimer);
+        clearTimeout(this.ctx.tunnelingAckTimer);
       },
       inbound_TUNNELING_ACK(datagram) {
-        this.log.debug(
+        this.ctx.log.debug(
           util.format(
             '===== datagram %d acknowledged by IP router',
             datagram.tunnstate.seqnum
@@ -531,7 +494,7 @@ module.exports = machina.Fsm.extend({
         this.transition('idle');
       },
       ['*'](data) {
-        this.log.debug(
+        this.ctx.log.debug(
           util.format(
             '*** deferring %s until transition sendTunnReq_waitACK => idle',
             data.inputType
@@ -546,105 +509,20 @@ module.exports = machina.Fsm.extend({
      */
     recvTunnReqIndication: {
       _onEnter(datagram) {
-        this.seqnumRecv = datagram.tunnstate.seqnum;
-        this.acknowledge(datagram);
+        const ctx = this.ctx;
+        ctx.seqnumRecv = datagram.tunnstate.seqnum;
+        ctx.acknowledge(datagram);
         this.transition('idle');
-        this.emitEvent(datagram);
+        ctx.emitEvent(datagram);
       },
       ['*'](data) {
-        this.log.debug(util.format('*** deferring Until Transition %j', data));
+        this.ctx.log.debug(
+          util.format('*** deferring Until Transition %j', data)
+        );
         this.deferUntilTransition('idle');
       },
     },
   },
-
-  acknowledge(datagram) {
-    const ack = this.prepareDatagram(
-      KnxConstants.SERVICE_TYPE.TUNNELING_ACK,
-      datagram
-    );
-    /* acknowledge by copying the inbound datagram's sequence counter */
-    ack.tunnstate.seqnum = datagram.tunnstate.seqnum;
-    this.send(ack, (err) => {
-      // TODO: handle send err
-    });
-  },
-
-  emitEvent(datagram) {
-    // emit events to our beloved subscribers in a multitude of targets
-    // ORDER IS IMPORTANT!
-    const evtName = datagram.cemi.apdu.apci;
-    // 1.
-    // 'event_<dest_addr>', ''GroupValue_Write', src, data
-    this.emit(
-      util.format('event_%s', datagram.cemi.dest_addr),
-      evtName,
-      datagram.cemi.src_addr,
-      datagram.cemi.apdu.data
-    );
-    // 2.
-    // 'GroupValue_Write_1/2/3', src, data
-    this.emit(
-      util.format('%s_%s', evtName, datagram.cemi.dest_addr),
-      null,
-      datagram.cemi.src_addr,
-      datagram.cemi.apdu.data
-    );
-    // 3.
-    // 'GroupValue_Write', src, dest, data
-    this.emit(
-      evtName,
-      datagram.cemi.src_addr,
-      datagram.cemi.dest_addr,
-      datagram.cemi.apdu.data
-    );
-    // 4.
-    // 'event', 'GroupValue_Write', src, dest, data
-    this.emit(
-      'event',
-      evtName,
-      datagram.cemi.src_addr,
-      datagram.cemi.dest_addr,
-      datagram.cemi.apdu.data
-    );
-  },
-
-  getLocalAddress() {
-    const candidateInterfaces = this.getIPv4Interfaces();
-    // if user has declared a desired interface then use it
-    if (this.options && this.options.interface) {
-      const iface = candidateInterfaces[this.options.interface];
-      if (!iface)
-        throw new Error(
-          'Interface ' +
-            this.options.interface +
-            ' not found or has no useful IPv4 address!'
-        );
-
-      return candidateInterfaces[this.options.interface].address;
-    }
-    // just return the first available IPv4 non-loopback interface
-    const first = Object.values(candidateInterfaces)[0];
-    if (first) return first.address;
-
-    // no local IpV4 interfaces?
-    throw 'No valid IPv4 interfaces detected';
-  },
-
-  // get the local address of the IPv4 interface we're going to use
-  getIPv4Interfaces() {
-    const candidateInterfaces = {};
-    const interfaces = os.networkInterfaces();
-    for (const [iface, addrs] of Object.entries(interfaces)) {
-      for (const addr of addrs) {
-        if ([4, 'IPv4'].indexOf(addr.family) > -1 && !addr.internal) {
-          this.log.trace(
-            util.format('candidate interface: %s (%j)', iface, addr)
-          );
-          candidateInterfaces[iface] = addr;
-        }
-      }
-    }
-    return candidateInterfaces;
-  },
 });
+
+module.exports = KnxFsm;
