@@ -33,7 +33,8 @@ var connection = new knx.Connection( {
       // you also WRITE to an explicit datapoint type, eg. DPT9.001 is temperature Celcius
       connection.write("2/1/0", 22.5, "DPT9.001");
       // you can also issue a READ request and pass a callback to capture the response
-      connection.read("1/0/1", (err, src, responsevalue) => { ... });
+      // (err is set if no response arrives within readReqTimeout, default 3000ms)
+      connection.read({ ga: "1/0/1", readReqTimeout: 3000 }, (err, src, responsevalue) => { ... });
     },
     // get notified for all KNX events:
     event: function(evt, src, dest, value) { console.log(
@@ -68,9 +69,9 @@ binary_control.bind(connection);
 // write a new value to the bus
 binary_control.write(true); // or false!
 // send a read request, and fire the callback upon response
-binary_control.read( function (response) {
-    console.log("KNX response: %j", response);
-  };
+binary_control.read( function (err, src, value) {
+    console.log("KNX response from %s: %j", src, value);
+  });
 // or declare a dimmer control
 var dimmer_control = new knx.Datapoint({ga: '1/2/33', dpt: 'DPT3.007'});
 // declare a binary STATUS datapoint, which will automatically read off its value
@@ -91,7 +92,7 @@ var connection = knx.Connection({
       console.log('----------');
       var dp = new knx.Datapoint({ga: '1/1/1'}, connection);
       // Now send off a couple of requests:
-      dp.read((src, value) => {
+      dp.read((err, src, value) => {
         console.log("**** RESPONSE %j reports current value: %j", src, value);
       });
       dp.write(1);

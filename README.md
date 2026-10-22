@@ -13,7 +13,7 @@ A feature-complete [KNXnet/IP protocol stack](https://www.knx.org/en-us/knx/tech
 
 ## Installation
 
-Make sure your machine has Node.JS (version 4.x or greater) and do:
+Make sure your machine has Node.JS (version 22.22 or greater) and do:
 
 `npm install knx`
 
