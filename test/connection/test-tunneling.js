@@ -227,6 +227,33 @@ test('tunneling: inbound L_Data.ind is acknowledged and emitted', async (t) => {
   close(gw, conn);
 });
 
+test('tunneling: a burst of inbound telegrams while waiting for an ACK', async (t) => {
+  const { gw, conn } = await connected((gw) => (gw.autoAckTunneling = false));
+  const count = 30;
+  const received = [];
+  conn.on('event', (evt, src, dest) => received.push(dest));
+  conn.write('1/2/3', 1, 'DPT1');
+  const request = await gw.next('TUNNELING_REQUEST');
+  for (let i = 0; i < count; i++) {
+    gw.sendGroupValue('1.1.20', `3/0/${i}`, APCI.WRITE, 1);
+  }
+  await delay(100);
+  t.equal(received.length, 0, 'holds them back until the ACK arrives');
+  gw.sendTunnelingAck(request.tunnstate.seqnum);
+  await delay(300);
+  t.deepEqual(
+    received,
+    Array.from({ length: count }, (_, i) => `3/0/${i}`),
+    'then emits all of them, in order'
+  );
+  t.equal(
+    gw.received.filter((p) => p.name === 'TUNNELING_ACK').length,
+    count,
+    'and acknowledges each one'
+  );
+  close(gw, conn);
+});
+
 test('tunneling: telegrams for another channel are ignored', async (t) => {
   const { gw, conn } = await connected();
   let events = 0;
