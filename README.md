@@ -1,5 +1,7 @@
 ## KNXnet/IP for Node.JS
 
+> This is a fork of [knx](https://github.com/ekarak/knx) by Elias Karakoulakis, published as `@phytec/knx`. Version 3 runs on machina 8 and requires Node.js 22.22 or greater.
+
 [![CI](https://github.com/ekarak/knx/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/ekarak/knx/actions/workflows/ci.yml)
 
 **New:** [Join the Gitter.im chatroom!](https://gitter.im/knx-js/Lobby)
@@ -15,14 +17,14 @@ A feature-complete [KNXnet/IP protocol stack](https://www.knx.org/en-us/knx/tech
 
 Make sure your machine has Node.JS (version 22.22 or greater) and do:
 
-`npm install knx`
+`npm install @phytec/knx@next`
 
 ## Usage
 
 At last, here's a **reliable** KNX connection that simply works without any configs. To get a basic KNX monitor, you just need to run this in Node:
 
 ```js
-var knx = require('knx');
+var knx = require('@phytec/knx');
 var connection = knx.Connection({
  handlers: {
   connected: function() {

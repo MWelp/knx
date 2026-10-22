@@ -105,25 +105,56 @@ test('routing: write sends a ROUTING_INDICATION', async (t) => {
   t.deepEqual([...dg.cemi.apdu.data], [1], 'carries the value');
 });
 
-test('routing: minimumDelay between outbound requests', async (t) => {
-  const delayed = knx.Connection({
-    manualConnect: true,
-    loglevel: 'error',
-    minimumDelay: 150,
-  });
+// Multicast copies may reach the bus over several interfaces at different
+// times, so timing and order are measured at the connection's socket.
+const connectWithSpy = async (options) => {
+  const delayed = knx.Connection(
+    Object.assign({ manualConnect: true, loglevel: 'error' }, options)
+  );
   const ready = once(delayed, 'connected');
   delayed.Connect();
   await ready;
+  const sent = [];
+  const send = delayed.socket.send.bind(delayed.socket);
+  delayed.socket.send = (buf, ...args) => {
+    const reader = KnxProtocol.createReader(buf);
+    reader.KNXNetHeader('dg');
+    sent.push({ dest: reader.next().dg.cemi.dest_addr, at: Date.now() });
+    return send(buf, ...args);
+  };
+  return { delayed, sent };
+};
+
+test('routing: minimumDelay between outbound requests', async (t) => {
+  const { delayed, sent } = await connectWithSpy({ minimumDelay: 150 });
   delayed.write('1/3/1', 1, 'DPT1');
   delayed.write('1/3/2', 1, 'DPT1');
-  const first = await waitFor(() =>
-    bus.received.find((d) => d.cemi.dest_addr === '1/3/1')
+  await waitFor(() => sent.length === 2);
+  const gap = sent[1].at - sent[0].at;
+  t.deepEqual(
+    sent.map((s) => s.dest),
+    ['1/3/1', '1/3/2'],
+    'sends both requests'
   );
-  const second = await waitFor(() =>
-    bus.received.find((d) => d.cemi.dest_addr === '1/3/2')
+  t.ok(gap >= 145, `keeps at least minimumDelay between requests (${gap}ms)`);
+  delayed.socket.close();
+});
+
+test('routing: minimumDelay keeps the order of outbound requests', async (t) => {
+  const { delayed, sent } = await connectWithSpy({ minimumDelay: 5 });
+  const count = 30;
+  for (let i = 0; i < count; i++) delayed.write(`1/4/${i}`, 1, 'DPT1');
+  await waitFor(() => sent.length === count);
+  t.deepEqual(
+    sent.map((s) => s.dest),
+    Array.from({ length: count }, (_, i) => `1/4/${i}`),
+    'sends the requests in the order they were issued'
   );
-  const gap = second.receivedAt - first.receivedAt;
-  t.ok(gap >= 140, `keeps at least minimumDelay between requests (${gap}ms)`);
+  const gaps = sent.slice(1).map((s, i) => s.at - sent[i].at);
+  t.ok(
+    gaps.every((gap) => gap >= 4),
+    `keeps minimumDelay between all of them (min ${Math.min(...gaps)}ms)`
+  );
   delayed.socket.close();
 });
 

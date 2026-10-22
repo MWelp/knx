@@ -30,6 +30,22 @@ const deferUntilIdle = (ctx, inputName, args) => {
   ctx.deferredInputs.push({ inputName, args });
 };
 
+// milliseconds an outbound datagram still has to wait for options.minimumDelay
+const minimumDelayRemaining = (ctx) =>
+  ctx.options.minimumDelay
+    ? ctx.options.minimumDelay - (Date.now() - ctx.lastSentTime)
+    : 0;
+
+// send an outbound datagram now, or once minimumDelay has passed
+const sendOutbound = (ctx, inputName, datagram) => {
+  if (minimumDelayRemaining(ctx) > 0) {
+    ctx.delayedInput = inputName;
+    transitionWith(ctx, 'waitingMinimumDelay', datagram);
+  } else {
+    transitionWith(ctx, 'sendDatagram', datagram);
+  }
+};
+
 // the connection state check only makes sense on an established connection
 const clearIdleTimer = (ctx) => {
   clearTimeout(ctx.idletimer);
@@ -289,42 +305,14 @@ const createKnxFsm = (connection) =>
         // while idle we can either...
 
         // 1) queue an OUTGOING routing indication...
-        outbound_ROUTING_INDICATION({ ctx }, datagram) {
-          const elapsed = Date.now() - ctx.lastSentTime;
-          // if no miminum delay set OR the last sent datagram was long ago...
-          if (
-            !ctx.options.minimumDelay ||
-            elapsed >= ctx.options.minimumDelay
-          ) {
-            // ... send now
-            transitionWith(ctx, 'sendDatagram', datagram);
-          } else {
-            // .. or else, let the FSM handle it later
-            setTimeout(
-              () => ctx.fsm.handle('outbound_ROUTING_INDICATION', datagram),
-              ctx.minimumDelay - elapsed
-            );
-          }
+        outbound_ROUTING_INDICATION({ ctx, inputName }, datagram) {
+          sendOutbound(ctx, inputName, datagram);
         },
 
         // 2) queue an OUTGOING tunelling request...
-        outbound_TUNNELING_REQUEST({ ctx }, datagram) {
+        outbound_TUNNELING_REQUEST({ ctx, inputName }, datagram) {
           if (ctx.useTunneling) {
-            const elapsed = Date.now() - ctx.lastSentTime;
-            // if no miminum delay set OR the last sent datagram was long ago...
-            if (
-              !ctx.options.minimumDelay ||
-              elapsed >= ctx.options.minimumDelay
-            ) {
-              // ... send now
-              transitionWith(ctx, 'sendDatagram', datagram);
-            } else {
-              // .. or else, let the FSM handle it later
-              setTimeout(
-                () => ctx.fsm.handle('outbound_TUNNELING_REQUEST', datagram),
-                ctx.minimumDelay - elapsed
-              );
-            }
+            sendOutbound(ctx, inputName, datagram);
           } else {
             KnxLog.get().debug(
               "(%s):\tdropping outbound TUNNELING_REQUEST, we're in routing mode",
@@ -427,6 +415,43 @@ const createKnxFsm = (connection) =>
           ctx.log.debug(
             util.format(
               '*** deferring %s until transition from requestingConnState => idle',
+              inputName
+            )
+          );
+          deferUntilIdle(ctx, inputName, args);
+        },
+      },
+
+      /*
+       * An outbound datagram waits for options.minimumDelay to pass since the
+       * last one was sent. Everything else waits behind it, which keeps
+       * outbound datagrams in the order they were issued.
+       */
+      waitingMinimumDelay: {
+        _onEnter({ ctx }) {
+          const datagram = ctx.fsmDatagram;
+          ctx.minimumDelayTimer = setTimeout(() => {
+            ctx.minimumDelayTimer = null;
+            transitionWith(ctx, 'sendDatagram', datagram);
+          }, minimumDelayRemaining(ctx));
+          ctx.minimumDelayDatagram = datagram;
+        },
+        _onExit({ ctx }) {
+          if (ctx.minimumDelayTimer) {
+            // left before sending (e.g. for a connection state check):
+            // the datagram is still the next one to go out
+            clearTimeout(ctx.minimumDelayTimer);
+            ctx.minimumDelayTimer = null;
+            ctx.deferredInputs.unshift({
+              inputName: ctx.delayedInput,
+              args: [ctx.minimumDelayDatagram],
+            });
+          }
+        },
+        ['*']({ ctx, inputName }, ...args) {
+          ctx.log.debug(
+            util.format(
+              '*** deferring %s until transition waitingMinimumDelay => idle',
               inputName
             )
           );

@@ -3,7 +3,7 @@
 * (C) 2016-2017 Elias Karakoulakis
 */
 
-var knx = require('knx');
+var knx = require('../');
 
 if (process.argv.length < 3) {
 	console.log('usage: %s <ga> <optional: status_ga> to toggle a light on & off',
