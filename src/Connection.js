@@ -3,16 +3,228 @@
  * (C) 2016-2018 Elias Karakoulakis
  */
 
+const os = require('os');
 const util = require('util');
+const EventEmitter = require('events');
+const ipaddr = require('ipaddr.js');
 
-const FSM = require('./FSM');
+const createKnxFsm = require('./FSM');
+const IpRoutingConnection = require('./IpRoutingConnection.js');
+const IpTunnelingConnection = require('./IpTunnelingConnection.js');
 const DPTLib = require('./dptlib');
 const KnxLog = require('./KnxLog');
 const KnxConstants = require('./KnxConstants');
 const KnxNetProtocol = require('./KnxProtocol');
 
+/*
+ * A KNXnet/IP connection. It holds the connection data and drives the
+ * connection state machine (src/FSM.js), which it keeps internally.
+ *
+ * Its event API mirrors the machina 4 emitter the connection used to
+ * inherit from: on() returns a subscription, off() can remove all listeners
+ * (of one event), '*' listeners receive every event, and an 'error' event
+ * without listener is ignored.
+ */
+class KnxConnection extends EventEmitter {
+  constructor(options) {
+    super();
+    // like the machina 4 FSM before, expose all options as properties too
+    Object.assign(this, options);
+    this.setMaxListeners(0);
+    this.options = options || {};
+    // initialise the log driver - to set the loglevel
+    this.log = KnxLog.get(options);
+    // set the local IP endpoint
+    this.localAddress = null;
+    this.ThreeLevelGroupAddressing = true;
+    // reconnection cycle counter
+    this.reconnection_cycles = 0;
+    // inactivity before checking the connection state (internal, tests shorten it)
+    this.idleTimeout = this.idleTimeout || 60000;
+    // a cache of recently sent requests
+    this.sentTunnRequests = {};
+    this.useTunneling = options.forceTunneling || false;
+    this.remoteEndpoint = {
+      addrstring: options.ipAddr || '224.0.23.12',
+      addr: ipaddr.parse(options.ipAddr || '224.0.23.12'),
+      port: options.ipPort || 3671,
+    };
+    const range = this.remoteEndpoint.addr.range();
+    this.localEchoInTunneling =
+      typeof options.localEchoInTunneling !== 'undefined'
+        ? options.localEchoInTunneling
+        : false; // 14=73/2020 Supergiovane (local echo of emitEvent if in tunneling mode)
+    this.log.debug(
+      'initializing %s connection to %s',
+      range,
+      this.remoteEndpoint.addrstring
+    );
+    switch (range) {
+      case 'multicast':
+        if (this.localEchoInTunneling) {
+          this.localEchoInTunneling = false;
+          this.log.debug(
+            'localEchoInTunneling: true but DISABLED because i am on multicast'
+          );
+        } // 14/03/2020 Supergiovane: if multicast, disable the localEchoInTunneling, because there is already an echo
+        IpRoutingConnection(this);
+        break;
+      case 'unicast':
+      case 'private':
+      case 'loopback':
+        this.useTunneling = true;
+        IpTunnelingConnection(this);
+        break;
+      default:
+        throw util.format(
+          'IP address % (%s) cannot be used for KNX',
+          options.ipAddr,
+          range
+        );
+    }
+    // inputs deferred by the state machine until it is idle again
+    this.deferredInputs = [];
+    this.fsm = createKnxFsm(this);
+    // the state machine's own events (transitioned, handling, ...) used to be
+    // emitted on the connection, so keep forwarding them; machina 4 called
+    // 'transitioning' 'transition'
+    this.fsm.on('*', (eventName, data) => {
+      if (eventName === 'transitioning') this.emit('transition', data);
+      this.emit(eventName, data);
+    });
+  }
+
+  get state() {
+    return this.fsm.currentState();
+  }
+
+  // drop all inputs deferred by the state machine
+  clearQueue() {
+    this.deferredInputs = [];
+  }
+
+  compositeState() {
+    return this.fsm.compositeState();
+  }
+
+  emit(eventName, ...args) {
+    // like machina 4: '*' listeners first, receiving the event name
+    if (eventName !== '*') super.emit('*', eventName, ...args);
+    // like machina 4: an 'error' nobody listens to is not thrown
+    if (eventName === 'error' && this.listenerCount('error') === 0)
+      return false;
+    return super.emit(eventName, ...args);
+  }
+
+  on(eventName, callback) {
+    super.on(eventName, callback);
+    return {
+      eventName,
+      callback,
+      off: () => this.off(eventName, callback),
+    };
+  }
+
+  off(eventName, callback) {
+    if (!eventName) this.removeAllListeners();
+    else if (!callback) this.removeAllListeners(eventName);
+    else this.removeListener(eventName, callback);
+    return this;
+  }
+
+  acknowledge(datagram) {
+    const ack = this.prepareDatagram(
+      KnxConstants.SERVICE_TYPE.TUNNELING_ACK,
+      datagram
+    );
+    /* acknowledge by copying the inbound datagram's sequence counter */
+    ack.tunnstate.seqnum = datagram.tunnstate.seqnum;
+    this.send(ack, (err) => {
+      // TODO: handle send err
+    });
+  }
+
+  emitEvent(datagram) {
+    // emit events to our beloved subscribers in a multitude of targets
+    // ORDER IS IMPORTANT!
+    const evtName = datagram.cemi.apdu.apci;
+    // 1.
+    // 'event_<dest_addr>', ''GroupValue_Write', src, data
+    this.emit(
+      util.format('event_%s', datagram.cemi.dest_addr),
+      evtName,
+      datagram.cemi.src_addr,
+      datagram.cemi.apdu.data
+    );
+    // 2.
+    // 'GroupValue_Write_1/2/3', src, data
+    this.emit(
+      util.format('%s_%s', evtName, datagram.cemi.dest_addr),
+      null,
+      datagram.cemi.src_addr,
+      datagram.cemi.apdu.data
+    );
+    // 3.
+    // 'GroupValue_Write', src, dest, data
+    this.emit(
+      evtName,
+      datagram.cemi.src_addr,
+      datagram.cemi.dest_addr,
+      datagram.cemi.apdu.data
+    );
+    // 4.
+    // 'event', 'GroupValue_Write', src, dest, data
+    this.emit(
+      'event',
+      evtName,
+      datagram.cemi.src_addr,
+      datagram.cemi.dest_addr,
+      datagram.cemi.apdu.data
+    );
+  }
+
+  getLocalAddress() {
+    const candidateInterfaces = this.getIPv4Interfaces();
+    // if user has declared a desired interface then use it
+    if (this.options && this.options.interface) {
+      const iface = candidateInterfaces[this.options.interface];
+      if (!iface)
+        throw new Error(
+          'Interface ' +
+            this.options.interface +
+            ' not found or has no useful IPv4 address!'
+        );
+
+      return candidateInterfaces[this.options.interface].address;
+    }
+    // just return the first available IPv4 non-loopback interface
+    const first = Object.values(candidateInterfaces)[0];
+    if (first) return first.address;
+
+    // no local IpV4 interfaces?
+    throw 'No valid IPv4 interfaces detected';
+  }
+
+  // get the local address of the IPv4 interface we're going to use
+  getIPv4Interfaces() {
+    const candidateInterfaces = {};
+    const interfaces = os.networkInterfaces();
+    for (const [iface, addrs] of Object.entries(interfaces)) {
+      for (const addr of addrs) {
+        if ([4, 'IPv4'].indexOf(addr.family) > -1 && !addr.internal) {
+          this.log.trace(
+            util.format('candidate interface: %s (%j)', iface, addr)
+          );
+          candidateInterfaces[iface] = addr;
+        }
+      }
+    }
+    return candidateInterfaces;
+  }
+}
+
 // bind incoming UDP packet handler
-FSM.prototype.onUdpSocketMessage = function (msg, rinfo, callback) {
+KnxConnection.prototype.onUdpSocketMessage = function (msg, rinfo, callback) {
   // get the incoming packet's service type ...
   try {
     const reader = KnxNetProtocol.createReader(msg);
@@ -34,7 +246,7 @@ FSM.prototype.onUdpSocketMessage = function (msg, rinfo, callback) {
         KnxLog.get().info("empty internal fsm queue due to %s: ", signal);
         this.clearQueue();
       }
-      this.handle(signal, dg);
+      this.fsm.handle(signal, dg);
     }
   } catch (err) {
     KnxLog.get().debug('(%s): Incomplete/unparseable UDP packet: %s: %s',
@@ -43,14 +255,14 @@ FSM.prototype.onUdpSocketMessage = function (msg, rinfo, callback) {
   }
 };
 
-FSM.prototype.AddConnState = function (datagram) {
+KnxConnection.prototype.AddConnState = function (datagram) {
   datagram.connstate = {
     channel_id: this.channel_id,
     state: 0
   }
 }
 
-FSM.prototype.AddTunnState = function (datagram) {
+KnxConnection.prototype.AddTunnState = function (datagram) {
   // add the remote IP router's endpoint
   datagram.tunnstate = {
     channel_id: this.channel_id,
@@ -67,7 +279,7 @@ const AddCRI = (datagram) => {
   }
 }
 
-FSM.prototype.AddCEMI = function (datagram, msgcode) {
+KnxConnection.prototype.AddCEMI = function (datagram, msgcode) {
   const sendAck = ((msgcode || 0x11) == 0x11) && !this.options.suppress_ack_ldatareq; // only for L_Data.req
   datagram.cemi = {
     msgcode: msgcode || 0x11, // default: L_Data.req for tunneling
@@ -104,7 +316,7 @@ FSM.prototype.AddCEMI = function (datagram, msgcode) {
  *    if a function is passed, use this to DECORATE
  *    if NULL, then just make a new empty datagram. Look at AddXXX methods
  */
-FSM.prototype.Request = function (type, datagram_template, callback) {
+KnxConnection.prototype.Request = function (type, datagram_template, callback) {
   // populate skeleton datagram
   const datagram = this.prepareDatagram(type);
   // decorate the datagram, if a function is passed
@@ -115,12 +327,12 @@ FSM.prototype.Request = function (type, datagram_template, callback) {
   datagram.service_type = type;
   const st = KnxConstants.keyText('SERVICE_TYPE', type);
   // hand off the outbound request to the state machine
-  this.handle('outbound_' + st, datagram);
+  this.fsm.handle('outbound_' + st, datagram);
   if (typeof callback === 'function') callback();
 }
 
 // prepare a datagram for the given service type
-FSM.prototype.prepareDatagram = function (svcType) {
+KnxConnection.prototype.prepareDatagram = function (svcType) {
   const datagram = {
     "header_length": 6,
     "protocol_version": 16, // 0x10 == version 1.0
@@ -158,7 +370,7 @@ FSM.prototype.prepareDatagram = function (svcType) {
 /*
 send the datagram over the wire
 */
-FSM.prototype.send = function (datagram, callback) {
+KnxConnection.prototype.send = function (datagram, callback) {
   var cemitype; // TODO: set, but unused
   try {
     this.writer = KnxNetProtocol.createWriter();
@@ -190,7 +402,7 @@ FSM.prototype.send = function (datagram, callback) {
   }
 }
 
-FSM.prototype.write = function (grpaddr, value, dptid, callback) {
+KnxConnection.prototype.write = function (grpaddr, value, dptid, callback) {
   if (grpaddr == null || value == null) {
     KnxLog.get().warn('You must supply both grpaddr and value!');
     return;
@@ -209,7 +421,7 @@ FSM.prototype.write = function (grpaddr, value, dptid, callback) {
   }
 }
 
-FSM.prototype.respond = function (grpaddr, value, dptid) {
+KnxConnection.prototype.respond = function (grpaddr, value, dptid) {
   if (grpaddr == null || value == null) {
     KnxLog.get().warn('You must supply both grpaddr and value!');
     return;
@@ -226,7 +438,7 @@ FSM.prototype.respond = function (grpaddr, value, dptid) {
   });
 }
 
-FSM.prototype.writeRaw = function (grpaddr, value, bitlength, callback) {
+KnxConnection.prototype.writeRaw = function (grpaddr, value, bitlength, callback) {
   if (grpaddr == null || value == null) {
     KnxLog.get().warn('You must supply both grpaddr and value!');
     return;
@@ -248,7 +460,7 @@ FSM.prototype.writeRaw = function (grpaddr, value, bitlength, callback) {
 
 // send a READ request to the bus
 // you can pass a callback function which gets bound to the RESPONSE datagram event
-FSM.prototype.read = function (options, callback) {
+KnxConnection.prototype.read = function (options, callback) {
   const { ga: grpaddr, readReqTimeout } = options;
   if (typeof callback == 'function') {
     // when the response arrives:
@@ -284,12 +496,12 @@ FSM.prototype.read = function (options, callback) {
   });
 }
 
-FSM.prototype.Disconnect = function (cb) {
+KnxConnection.prototype.Disconnect = function (cb) {
   var that = this;
 
   if (this.state === 'connecting') {
     KnxLog.get().debug('Disconnecting directly');
-    that.transition("uninitialized");
+    that.fsm.transition("uninitialized");
     if (cb) {
       cb()
     }
@@ -300,7 +512,9 @@ FSM.prototype.Disconnect = function (cb) {
   this.onIdle(function () {
     KnxLog.get().trace('In Idle-State');
 
-    that.on('disconnected', () => {
+    const subscription = that.on('disconnected', () => {
+      // only for this Disconnect, not for later ones
+      subscription.off();
       KnxLog.get().debug('Disconnected from KNX');
       if (cb) {
         cb()
@@ -308,20 +522,22 @@ FSM.prototype.Disconnect = function (cb) {
     });
 
     KnxLog.get().debug('Disconnecting from KNX');
-    that.transition("disconnecting");
+    that.fsm.transition("disconnecting");
   });
 
   // machina.js removeAllListeners equivalent:
   // this.off();
 }
 
-FSM.prototype.onIdle = function (cb) {
+KnxConnection.prototype.onIdle = function (cb) {
   if (this.state === 'idle') {
     KnxLog.get().trace('Connection is already Idle');
     cb();
   } else {
-    this.on("transition", function (data) {
+    const subscription = this.on("transition", function (data) {
       if (data.toState === 'idle') {
+        // only the next time we get idle, not every time
+        subscription.off();
         KnxLog.get().trace('Connection just transitioned to Idle');
         cb();
       }
@@ -359,7 +575,7 @@ const AddTunn = (datagram) => {
 
 // TODO: Conncetion is obviously not a constructor, but tests call it with `new`. That should be deprecated.
 function Connection(options) {
-  const conn = new FSM(options);
+  const conn = new KnxConnection(options);
   // register with the FSM any event handlers passed into the options object
   if (typeof options.handlers === 'object') {
     for (const [key, value] of Object.entries(options.handlers)) {

@@ -32,7 +32,7 @@ function IpTunnelingConnection(instance) {
         this.onUdpSocketMessage(msg, rinfo, callback);
       });
       // start connection sequence
-      this.transition('connecting');
+      this.fsm.transition('connecting');
     });
     return this;
   };
